@@ -399,7 +399,18 @@ async function callClaude(contentBlocks) {
     })
   });
   if (!response.ok) {
-    throw new Error("The extraction service did not respond. Please try again.");
+    let detail = "";
+    try {
+      const errBody = await response.json();
+      detail = (errBody && errBody.error && (errBody.error.message || errBody.error)) || "";
+      if (typeof detail !== "string") detail = JSON.stringify(detail);
+    } catch (e) {
+      // body was not JSON (e.g. a platform error page)
+    }
+    if (response.status === 413) {
+      throw new Error("The file is too large to send. Try a smaller photo or fewer pages.");
+    }
+    throw new Error(`Extraction failed (error ${response.status})${detail ? ": " + detail : ""}`);
   }
   const data = await response.json();
   const textBlock = (data.content || []).find((b) => b.type === "text");
@@ -423,7 +434,7 @@ ${RETURN_SPEC}`;
   return parseJsonRows(text, "Couldn't understand the list in that photo. Try a clearer, flatter shot.");
 }
 
-const MAX_PDF_BYTES = 20 * 1024 * 1024;
+const MAX_PDF_BYTES = 3 * 1024 * 1024;
 
 async function extractCasesFromPdf(base64) {
   const prompt = `You are reading a PDF containing a surgical case list, OR schedule, or logbook. It may be a typed document, a scanned page, or a table, and may run to several pages. Find every distinct surgical case in it and return them as a JSON array.
@@ -1283,8 +1294,11 @@ export default function SurgicalCaseLog() {
     setExtractingLabel("Reading the list…");
     setExtracting(true);
     try {
-      const base64 = await fileToBase64(file);
-      const rows = await extractCasesFromImage(base64, file.type || "image/jpeg");
+      // Shrink the photo first: phone photos are several MB, and Vercel
+      // serverless functions reject request bodies larger than ~4.5MB.
+      const compressed = await compressImageFile(file, 2000, 0.85);
+      const base64 = compressed.split(",")[1];
+      const rows = await extractCasesFromImage(base64, "image/jpeg");
       setReviewRows(rows.map((r) => ({ ...r, included: true })));
     } catch (e) {
       setExtractError(e.message || "Something went wrong reading that photo.");
@@ -1343,7 +1357,7 @@ export default function SurgicalCaseLog() {
     setExtracting(true);
     try {
       if (file.size > MAX_PDF_BYTES) {
-        throw new Error("That PDF is quite large (over 20MB) — try exporting a smaller range of pages.");
+        throw new Error("That PDF is too large (over 3MB) — export fewer pages, or photograph the list instead.");
       }
       const base64 = await fileToBase64(file);
       const rows = await extractCasesFromPdf(base64);
